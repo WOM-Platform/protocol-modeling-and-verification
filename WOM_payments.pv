@@ -1,0 +1,165 @@
+(* Protocol for performing payments *)
+
+(*
+Message (j): POS -> REG : {f, k, ACKpck, Pwd, N, IDpos}_PKreg
+Message (k): REG -> POS : {N, OTCpay, IDreg}_PKpos
+Message (l): POS -> REG : {OTCpay}_PKreg
+Message (m): POS -> PCK : (OTCpay)
+Message (n): PCK -> REG : {OTCpay, Pwd, Ks1}_PKreg
+Message (o): REG -> PCK : {f, k, IDpos}_Ks1
+Message (p): PCK -> REG : {OTCpay, Pwd, v1, v2,..., vk, h(S), Ks2}_PKreg
+Message (q): REG -> POS : {N}_PKpos
+Message (r): REG -> PCK : {ACKpos}_Ks2
+*)
+
+(******************************** DECLARATIONS ********************************)
+
+(* Declaration of channel *)
+free ch: channel.
+
+(* Types *)
+type nonce.   (* Nonce *)
+type pkey.    (* Public key *)
+type skey.    (* Secret key *)
+
+(* Names and costants *)
+free f, k: bitstring.
+free vk: bitstring [private].
+free ACKpck: bitstring.
+
+(* Hash function *)
+fun hash(nonce): bitstring.
+
+(* Type converter *)
+fun nonce_to_bitstring(nonce): bitstring [data,typeConverter].
+
+(* Public key encryption *)
+fun pk(skey): pkey.
+fun aencrypt(bitstring, pkey): bitstring.
+reduc forall x: bitstring, y: skey; adecrypt(aencrypt(x,pk(y)), y) = x.
+
+(* Shared key encryption *)
+fun sencrypt(bitstring, skey): bitstring.
+reduc forall x: bitstring, y: skey; sdecrypt(sencrypt(x, y), y) = x.
+
+(* Secrecy assumptions *)
+not attacker(new SKpos).
+not attacker(new SKreg).
+not attacker(new Pwd).
+
+(***************************** QUERIES AND EVENTS *****************************)
+
+(* Secrecy queries *)
+(* To test strong secrecy of vouchers *)
+noninterf vk.
+(* To test secrecy of some terms *)
+query attacker(vk).
+query secret Pwdreg;
+      secret Npos.
+
+(* Authentication queries *)
+event beginPOSAuthparam(pkey).
+event endPOSAuthparam(pkey).
+event beginREGAuthparam(pkey).
+event endREGAuthparam(pkey).
+
+query x: pkey; inj-event(endREGAuthparam(x)) ==> inj-event(beginREGAuthparam(x)).
+query x: pkey; inj-event(endPOSAuthparam(x)) ==> inj-event(beginPOSAuthparam(x)).
+
+(*********************************** MACROS ***********************************)
+
+(* Point of Sale *)
+let processPointOfSale(PKreg: pkey, SKpos: skey, Pwd: nonce) =
+  in (ch, pkX: pkey);
+  if pkX = PKreg then
+  event beginREGAuthparam(pkX);
+  new N: nonce;
+  out(ch, (aencrypt((f, k, ACKpck, Pwd, N, pk(SKpos)), pkX)));
+  in(ch, message_k: bitstring);
+  let(=N, OTCpayX: nonce, =pkX) = adecrypt(message_k, SKpos) in
+  out(ch, (aencrypt(nonce_to_bitstring(OTCpayX), pkX)));
+  event endPOSAuthparam(pk(SKpos));
+  let Npos = N in
+  out(ch, OTCpayX);
+  in(ch, message_q: bitstring);
+  let(=N, =PKreg) = adecrypt(message_q, SKpos) in
+  0.
+
+(* Registry *)
+let processRegistry(PKpos: pkey, SKreg: skey) =
+  (* BEGIN AUTHENTICATION WITH POS *)
+  in(ch, message_j: bitstring);
+  let(=f, =k, =ACKpck, PwdY: bitstring, NY: nonce, pkY: pkey) = adecrypt(message_j, SKreg) in
+  (* Start to run the protocol with pkY *)
+  event beginPOSAuthparam(pkY);
+  (* Generats a new one-time code OTCpay *)
+  new OTCpay: nonce;
+  (* Message (k): sends OTCpay to POS *)
+  out(ch, (aencrypt((NY, OTCpay, pk(SKreg)), pkY)));
+  in(ch, message_l: bitstring);
+  (* OK *)
+  if nonce_to_bitstring(OTCpay) = adecrypt(message_l, SKreg) then
+  if pkY = PKpos then
+  (* Record the end of the protocol with pkY *)
+  event endREGAuthparam(pk(SKreg));
+  (* END AUTHENTICATION WITH POS *)
+  let Pwdreg = PwdY in
+  in(ch, message_n: bitstring);
+  let (=OTCpay, =PwdY, Ks1Y: skey) = adecrypt(message_n, SKreg) in
+  (* Message (o): the request of payment is been confirmed *)
+  out(ch, (sencrypt((f, k, PKpos), Ks1Y)));
+  in(ch, message_p: bitstring);
+  (* Verify payment conditions *)
+  let (=OTCpay, =PwdY, =vk, md: bitstring, Ks2Y: skey) = adecrypt(message_p, SKreg) in
+  (* Message (q): notify that payment has been completed to the Merchant *)
+  out(ch, (aencrypt(nonce_to_bitstring(NY), PKpos)));
+  (* Message (r): confirm payment to the Pocket *)
+  out(ch, (sencrypt((ACKpck), Ks2Y))).
+
+
+(* Pocket *)
+let processPocket(PKreg: pkey, PKpos: pkey, Pwd: nonce) =
+  (* Await on the channel OTCpay *)
+  in(ch, (OTCpayZ: nonce));
+  (* Generate a fresh session key Ks1 *)
+  new Ks1: skey;
+  (* Message (n): release a new request of payment *)
+  out(ch, (aencrypt((OTCpayZ, Pwd, Ks1), PKreg)));
+  in(ch, message_o: bitstring);
+  let (=f, =k, =PKpos) = sdecrypt(message_o, Ks1) in
+  (* Generate a secret in the form of a new random sequence *)
+  new S: nonce;
+  (* Generate a fresh session key Ks2 *)
+  new Ks2: skey;
+  (* Message (p): transfer of vouchers *)
+  out(ch, (aencrypt((OTCpayZ, Pwd, vk, hash(S), Ks2), PKreg)));
+  in(ch, message_r: bitstring);
+  (* Symmetric decryption of message (r) with SKreg *)
+  let (=ACKpck) = sdecrypt(message_r, Ks2) in
+  0.
+
+(******************************** MAIN PROCESS ********************************)
+
+process
+  (* Create the user password used at the client side *)
+  new Pwd: nonce;
+  (* Create the secret key of Merchant *)
+  new SKpos: skey;
+  (* Create the public key of Merchant *)
+  let PKpos = pk(SKpos) in
+  (* Transmit the public key on channel ch *)
+  out(ch, PKpos);
+
+  (* Create the secret key of Registry *)
+  new SKreg: skey;
+  (* Create the public key of Registry *)
+  let PKreg = pk(SKreg) in
+  (* Transmit the public key on channel ch *)
+  out(ch, PKreg);
+
+  (* Launch an unbounded number of sessions of the Point of Sale *)
+  (!processPointOfSale(PKreg, SKpos, Pwd)) |
+  (* Launch an unbounded number of sessions of the Registry *)
+  (!processRegistry(PKpos, SKreg)) |
+  (* Launch an unbounded number of sessions of the Pocket *)
+  (!processPocket(PKreg, PKpos, Pwd))

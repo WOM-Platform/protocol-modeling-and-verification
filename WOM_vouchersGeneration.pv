@@ -1,0 +1,144 @@
+(******************************** DECLARATIONS ********************************)
+
+(* Public channel *)
+free ch: channel.
+
+(* Types *)
+type nonce.  (* Nonce *)
+type pkey.   (* Public key *)
+type skey.   (* Secret key *)
+
+(* Names and costants *)
+free cn: bitstring [private].
+free vn: bitstring [private].
+free confirm: bool.
+
+(* Type converter *)
+fun nonce_to_bitstring(nonce): bitstring [data,typeConverter].
+
+(* Public key encryption *)
+fun pk(skey): pkey.
+fun aencrypt(bitstring, pkey): bitstring.
+reduc forall x: bitstring, y: skey; adecrypt(aencrypt(x, pk(y)), y) = x.
+
+(* Shared key encryption *)
+fun sencrypt(bitstring, skey): bitstring.
+reduc forall x: bitstring, y: skey; sdecrypt(sencrypt(x, y), y) = x.
+
+(* Secrecy assumptions *)
+not attacker(new SKctas).
+not attacker(new SKinstr).
+not attacker(new SKreg).
+not attacker(new Pwd).
+
+(***************************** QUERIES AND EVENTS *****************************)
+
+(* Secrecy queries *)
+(* To test strong secrecy of vouchers *)
+ noninterf vn. 
+(* To test secrecy of some terms *)
+ query secret Pwdinstr;
+      secret Ninstr;
+      secret Pwdreg;
+      secret Nreg;
+      attacker(vn). 
+
+(* Authentication queries *)
+event beginREGAuthparam(pkey).
+event endREGAuthparam(pkey).
+event beginASAuthparam(pkey).
+event endASAuthparam(pkey).
+
+query x: pkey; inj-event(endREGAuthparam(x)) ==> inj-event(beginREGAuthparam(x)).
+query x: pkey; inj-event(endASAuthparam(x)) ==> inj-event(beginASAuthparam(x)).
+
+
+(*********************************** MACROS ***********************************)
+
+(* Collection Tool *)
+let processCollectionTool(SKctas: skey, Pwd: nonce) =
+  out(ch, sencrypt((cn, Pwd), SKctas));
+  in(ch, (message_e: bitstring));
+  let(OTCgen: bitstring) = sdecrypt(message_e, SKctas) in
+  if OTCgen <> (cn,Pwd) then out(ch, OTCgen). 
+(*    out(ch, OTCgen). *)
+
+
+(* Aggregation Service *)
+let processAggregationService(PKreg: pkey, SKinstr: skey, SKctas: skey) =
+  in(ch, message_a: bitstring);
+  let (c: bitstring, PwdX: nonce) = sdecrypt(message_a, SKctas) in
+  in (ch, pkX: pkey);
+  if pkX = PKreg then
+  event beginREGAuthparam(PKreg);
+  new N : nonce;
+  out (ch, aencrypt((c, PwdX, N, pk(SKinstr)), PKreg));
+  in(ch, message_c: bitstring);
+  let (=N, OTCgenX: nonce, =PKreg) = adecrypt(message_c, SKinstr) in
+  out (ch, aencrypt(nonce_to_bitstring(OTCgenX), PKreg));
+  event endASAuthparam(pk(SKinstr));
+  let Pwdinstr = PwdX in
+  let Ninstr = N in
+  let OTCgeninstr = OTCgenX in
+
+  out(ch, (sencrypt(nonce_to_bitstring(OTCgenX), SKctas)));
+  in(ch, message_i: bitstring);
+  let (=N, =confirm) = adecrypt(message_i, SKinstr) in
+  0.
+
+(* Registry *)
+let processRegistry(PKinstr: pkey, SKreg: skey) =
+  in(ch, message_b: bitstring);
+  let (c: bitstring, PwdY: nonce, NY: nonce, pkY: pkey) = adecrypt(message_b, SKreg) in
+  event beginASAuthparam(pkY);
+  new OTCgen: nonce;
+  out(ch, aencrypt((NY, OTCgen, pk(SKreg)), pkY));
+  in(ch, message_d: bitstring);
+  if nonce_to_bitstring(OTCgen) = adecrypt(message_d, SKreg) then
+  if pkY = PKinstr then
+  event endREGAuthparam(pk(SKreg));
+  let Nreg = NY in
+  let OTCgenreg = OTCgen in
+  let Pwdreg = PwdY in
+  in(ch, (message_g: bitstring));
+  let (=OTCgen, =PwdY, KsY: skey) = adecrypt(message_g, SKreg) in
+  out(ch, (sencrypt((vn), KsY)));
+  out(ch, (aencrypt((NY, confirm), PKinstr))).
+
+
+(* Pocket *)
+let processPocket(PKreg: pkey, Pwd: nonce) =
+  in(ch, (OTCgenZ: nonce));
+  new Ks : skey;
+  in (ch, pkX: pkey);
+  if pkX = PKreg then
+  out(ch, (aencrypt((OTCgenZ, Pwd, Ks), PKreg)));
+  in(ch, (message_h: bitstring));
+  let (=vn) = sdecrypt(message_h, Ks) in
+  0.
+
+(******************************** MAIN PROCESS ********************************)
+
+process
+  
+  new SKctas: skey;
+  new Pwd: nonce;
+  
+  new SKinstr: skey;
+  let PKinstr = pk(SKinstr) in
+  out(ch, PKinstr);
+
+  new SKreg: skey;
+  let PKreg = pk(SKreg) in
+  out(ch, PKreg);
+
+	(
+    (* Launch an unbounded number of sessions of the Collection Tool *)
+    (!processCollectionTool(SKctas,Pwd)) |
+    (* Launch an unbounded number of sessions of the Aggregation Service *)
+    (!processAggregationService(PKreg, SKinstr, SKctas)) |
+    (* Launch an unbounded number of sessions of the Registry *)
+    (!processRegistry(PKinstr, SKreg)) |
+    (* Launch an unbounded number of sessions of the Pocket *)
+    (!processPocket(PKreg,Pwd))
+  )
